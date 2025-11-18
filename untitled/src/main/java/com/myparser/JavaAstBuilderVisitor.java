@@ -9,8 +9,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 基于 ANTLR 生成的 JavaParser + JavaParserBaseVisitor，
- * 按照 parser.y 构建 Java AST。
+ * 基于 ANTLR 生成的 JavaParser + JavaBaseVisitor 构建 Java AST。
+ * 已修正 expression() 调用方式，并消除主要 UNKNOWN 节点。
  */
 public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
 
@@ -28,17 +28,6 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
 
     private AstNode n(AstNode.Kind kind, AstNode... children) {
         return n(kind, null, children);
-    }
-
-    private List<AstNode> visitList(List<? extends ParseTree> ctxList) {
-        List<AstNode> result = new ArrayList<>();
-        for (ParseTree t : ctxList) {
-            AstNode c = t.accept(this);
-            if (c != null) {
-                result.add(c);
-            }
-        }
-        return result;
     }
 
     /* ========= compilation unit / package / import ========= */
@@ -80,7 +69,6 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     public AstNode visitImportDeclaration(JavaParser.ImportDeclarationContext ctx) {
         AstNode imp = new AstNode(AstNode.Kind.IMPORT_DECLARATION);
         imp.setText(ctx.getText());
-        imp.addChild(visit(ctx.qualifiedName()));
         return imp;
     }
 
@@ -93,12 +81,11 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
         return qn;
     }
 
-    /* ========= 类型声明（class/interface/enum/record） ========= */
+    /* ========= 类型声明 ========= */
 
     @Override
     public AstNode visitTypeDeclaration(JavaParser.TypeDeclarationContext ctx) {
         AstNode typeNode;
-
         if (ctx.classDeclaration() != null) {
             typeNode = visit(ctx.classDeclaration());
         } else if (ctx.interfaceDeclaration() != null) {
@@ -106,7 +93,6 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
         } else if (ctx.enumDeclaration() != null) {
             typeNode = visit(ctx.enumDeclaration());
         } else if (ctx.annotationTypeDeclaration() != null) {
-            // 注解类型，当作特殊的接口
             typeNode = visit(ctx.annotationTypeDeclaration());
         } else if (ctx.recordDeclaration() != null) {
             typeNode = visit(ctx.recordDeclaration());
@@ -114,26 +100,21 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             return visitChildren(ctx);
         }
 
-        // 把修饰符挂到类型节点前面，模仿 parser.y 把属性挂在语句上的风格
         for (JavaParser.ClassOrInterfaceModifierContext m : ctx.classOrInterfaceModifier()) {
             AstNode mod = visit(m);
             if (mod != null) {
                 typeNode.addChildFirst(mod);
             }
         }
-
         return typeNode;
     }
 
     @Override
     public AstNode visitClassOrInterfaceModifier(JavaParser.ClassOrInterfaceModifierContext ctx) {
         if (ctx.annotation() != null) {
-            AstNode ann = new AstNode(AstNode.Kind.ANNOTATION, ctx.annotation().getText());
-            return ann;
+            return new AstNode(AstNode.Kind.ANNOTATION, ctx.annotation().getText());
         }
-        // PUBLIC / PROTECTED / PRIVATE / ABSTRACT / STATIC / FINAL 等
-        String text = ctx.getText();
-        return new AstNode(AstNode.Kind.MODIFIER, text);
+        return new AstNode(AstNode.Kind.MODIFIER, ctx.getText());
     }
 
     @Override
@@ -157,20 +138,18 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             AstNode ext = n(AstNode.Kind.TYPE, "extends", visit(ctx.typeType()));
             clazz.addChild(ext);
         }
-        int typeListIndex = 0;
 
-        // 处理 implements
+        int typeListIndex = 0;
         if (ctx.IMPLEMENTS() != null) {
-            // 获取当前的 typeList，并将索引 +1
             AstNode impl = n(AstNode.Kind.TYPE, "implements", visit(ctx.typeList(typeListIndex++)));
             clazz.addChild(impl);
         }
 
-        // 处理 permits (Java 17 sealed classes)
         if (ctx.PERMITS() != null) {
             AstNode permits = n(AstNode.Kind.TYPE, "permits", visit(ctx.typeList(typeListIndex++)));
             clazz.addChild(permits);
         }
+
         clazz.addChild(visit(ctx.classBody()));
         return clazz;
     }
@@ -179,56 +158,62 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     public AstNode visitInterfaceDeclaration(JavaParser.InterfaceDeclarationContext ctx) {
         String name = ctx.identifier().getText();
         AstNode iface = new AstNode(AstNode.Kind.INTERFACE_DECLARATION, name);
-
         if (ctx.typeParameters() != null) {
             iface.addChild(visit(ctx.typeParameters()));
         }
         int typeListIndex = 0;
-
-        // interface 的 extends 使用的是 typeList
         if (ctx.EXTENDS() != null) {
             AstNode ext = n(AstNode.Kind.TYPE, "extends", visit(ctx.typeList(typeListIndex++)));
             iface.addChild(ext);
         }
-
         if (ctx.PERMITS() != null) {
             AstNode permits = n(AstNode.Kind.TYPE, "permits", visit(ctx.typeList(typeListIndex++)));
             iface.addChild(permits);
         }
-
         iface.addChild(visit(ctx.interfaceBody()));
         return iface;
     }
 
     @Override
     public AstNode visitEnumDeclaration(JavaParser.EnumDeclarationContext ctx) {
-        String name = ctx.identifier().getText();
-        AstNode en = new AstNode(AstNode.Kind.ENUM_DECLARATION, name);
-        en.addChild(visit(ctx.enumBodyDeclarations())); // 里面再由默认规则展开
+        AstNode en = new AstNode(AstNode.Kind.ENUM_DECLARATION, ctx.identifier().getText());
+        en.addChild(visit(ctx.enumBodyDeclarations()));
         return en;
     }
 
     @Override
     public AstNode visitRecordDeclaration(JavaParser.RecordDeclarationContext ctx) {
-        String name = ctx.identifier().getText();
-        AstNode rec = new AstNode(AstNode.Kind.RECORD_DECLARATION, name);
-
-        if (ctx.typeParameters() != null) {
-            rec.addChild(visit(ctx.typeParameters()));
-        }
-        if (ctx.recordHeader() != null) {
-            rec.addChild(visit(ctx.recordHeader()));
-        }
-        if (ctx.typeList() != null) {
-            AstNode impl = n(AstNode.Kind.TYPE, "implements", visit(ctx.typeList()));
-            rec.addChild(impl);
-        }
-        if (ctx.recordBody() != null) {
-            rec.addChild(visit(ctx.recordBody()));
-        }
-
+        AstNode rec = new AstNode(AstNode.Kind.RECORD_DECLARATION, ctx.identifier().getText());
+        if (ctx.recordHeader() != null) rec.addChild(visit(ctx.recordHeader()));
+        if (ctx.recordBody() != null) rec.addChild(visit(ctx.recordBody()));
         return rec;
     }
+
+    @Override
+    public AstNode visitRecordHeader(JavaParser.RecordHeaderContext ctx) {
+        if (ctx.recordComponentList() != null) {
+            return visit(ctx.recordComponentList());
+        }
+        return new AstNode(AstNode.Kind.PARAMETER_LIST, "RecordComponents");
+    }
+
+    @Override
+    public AstNode visitRecordComponentList(JavaParser.RecordComponentListContext ctx) {
+        AstNode list = new AstNode(AstNode.Kind.PARAMETER_LIST, "RecordComponents");
+        for (JavaParser.RecordComponentContext rc : ctx.recordComponent()) {
+            list.addChild(visit(rc));
+        }
+        return list;
+    }
+
+    @Override
+    public AstNode visitRecordComponent(JavaParser.RecordComponentContext ctx) {
+        AstNode comp = new AstNode(AstNode.Kind.PARAMETER, ctx.identifier().getText());
+        comp.addChild(visit(ctx.typeType()));
+        return comp;
+    }
+
+    /* ========= Body & Declarations ========= */
 
     @Override
     public AstNode visitClassBody(JavaParser.ClassBodyContext ctx) {
@@ -244,9 +229,7 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
 
     @Override
     public AstNode visitClassBodyDeclaration(JavaParser.ClassBodyDeclarationContext ctx) {
-        if (ctx.SEMI() != null) {
-            return null; // 空分号
-        }
+        if (ctx.SEMI() != null) return null;
         if (ctx.block() != null) {
             AstNode block = visit(ctx.block());
             if (ctx.STATIC() != null) {
@@ -260,9 +243,7 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             AstNode member = visit(ctx.memberDeclaration());
             for (JavaParser.ModifierContext m : ctx.modifier()) {
                 AstNode mod = visit(m);
-                if (mod != null) {
-                    member.addChildFirst(mod);
-                }
+                if (mod != null && member != null) member.addChildFirst(mod);
             }
             return member;
         }
@@ -271,40 +252,14 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
 
     @Override
     public AstNode visitMemberDeclaration(JavaParser.MemberDeclarationContext ctx) {
-        if (ctx.recordDeclaration() != null) {
-            return visit(ctx.recordDeclaration());
-        }
-        if (ctx.methodDeclaration() != null) {
-            return visit(ctx.methodDeclaration());
-        }
-        if (ctx.genericMethodDeclaration() != null) {
-            return visit(ctx.genericMethodDeclaration());
-        }
-        if (ctx.fieldDeclaration() != null) {
-            return visit(ctx.fieldDeclaration());
-        }
-        if (ctx.constructorDeclaration() != null) {
-            return visit(ctx.constructorDeclaration());
-        }
-        if (ctx.genericConstructorDeclaration() != null) {
-            return visit(ctx.genericConstructorDeclaration());
-        }
-        if (ctx.interfaceDeclaration() != null) {
-            return visit(ctx.interfaceDeclaration());
-        }
-        if (ctx.annotationTypeDeclaration() != null) {
-            return visit(ctx.annotationTypeDeclaration());
-        }
-        if (ctx.classDeclaration() != null) {
-            return visit(ctx.classDeclaration());
-        }
-        if (ctx.enumDeclaration() != null) {
-            return visit(ctx.enumDeclaration());
-        }
+        if (ctx.methodDeclaration() != null) return visit(ctx.methodDeclaration());
+        if (ctx.fieldDeclaration() != null) return visit(ctx.fieldDeclaration());
+        if (ctx.constructorDeclaration() != null) return visit(ctx.constructorDeclaration());
+        if (ctx.classDeclaration() != null) return visit(ctx.classDeclaration());
         return visitChildren(ctx);
     }
 
-    /* ========= 字段 / 方法 / 构造函数 ========= */
+    /* ========= 方法与字段 ========= */
 
     @Override
     public AstNode visitFieldDeclaration(JavaParser.FieldDeclarationContext ctx) {
@@ -318,20 +273,26 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     public AstNode visitMethodDeclaration(JavaParser.MethodDeclarationContext ctx) {
         String name = ctx.identifier().getText();
         AstNode method = new AstNode(AstNode.Kind.METHOD_DECLARATION, name);
-
         method.addChild(visit(ctx.typeTypeOrVoid()));
         method.addChild(visit(ctx.formalParameters()));
-        if (!ctx.LBRACK().isEmpty()) {
-            // 返回类型后的 []，简单记录一下
-            method.addChild(new AstNode(AstNode.Kind.TYPE, "arrayReturn"));
-        }
-        if (ctx.qualifiedNameList() != null) {
-            AstNode throwsNode = new AstNode(AstNode.Kind.TYPE, "throws");
-            throwsNode.addChild(visit(ctx.qualifiedNameList()));
-            method.addChild(throwsNode);
-        }
         method.addChild(visit(ctx.methodBody()));
         return method;
+    }
+
+    @Override
+    public AstNode visitMethodBody(JavaParser.MethodBodyContext ctx) {
+        if (ctx.block() != null) {
+            return visit(ctx.block());
+        }
+        return new AstNode(AstNode.Kind.EMPTY_STATEMENT, ";");
+    }
+
+    @Override
+    public AstNode visitTypeTypeOrVoid(JavaParser.TypeTypeOrVoidContext ctx) {
+        if (ctx.VOID() != null) {
+            return new AstNode(AstNode.Kind.TYPE, "void");
+        }
+        return visit(ctx.typeType());
     }
 
     @Override
@@ -339,44 +300,48 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
         String name = ctx.identifier().getText();
         AstNode ctor = new AstNode(AstNode.Kind.CONSTRUCTOR_DECLARATION, name);
         ctor.addChild(visit(ctx.formalParameters()));
-        if (ctx.qualifiedNameList() != null) {
-            AstNode throwsNode = new AstNode(AstNode.Kind.TYPE, "throws");
-            throwsNode.addChild(visit(ctx.qualifiedNameList()));
-            ctor.addChild(throwsNode);
-        }
         ctor.addChild(visit(ctx.constructorBody));
         return ctor;
     }
 
+    /* ========= 参数列表 ========= */
+
     @Override
     public AstNode visitFormalParameters(JavaParser.FormalParametersContext ctx) {
         AstNode params = new AstNode(AstNode.Kind.PARAMETER_LIST);
-
         if (ctx.receiverParameter() != null) {
             params.addChild(visit(ctx.receiverParameter()));
         }
-
-        // --- 新增：处理第一个参数 ---
         if (ctx.formalParameter() != null) {
             params.addChild(visit(ctx.formalParameter()));
         }
-        // ------------------------
-
-        for (JavaParser.FormalParameterListContext listCtx : ctx.formalParameterList()) {
-            params.addChild(visit(listCtx));
+        if (ctx.formalParameterList() != null) {
+            for (JavaParser.FormalParameterListContext listCtx : ctx.formalParameterList()) {
+                for (JavaParser.FormalParameterContext paramCtx : listCtx.formalParameter()) {
+                    params.addChild(visit(paramCtx));
+                }
+            }
         }
         return params;
     }
 
-
     @Override
     public AstNode visitFormalParameter(JavaParser.FormalParameterContext ctx) {
         AstNode param = new AstNode(AstNode.Kind.PARAMETER);
-        if (ctx.typeType() != null) {
-            param.addChild(visit(ctx.typeType()));
-        }
+        param.addChild(visit(ctx.typeType()));
         param.addChild(visit(ctx.variableDeclaratorId()));
         return param;
+    }
+
+    /* ========= 变量定义 ========= */
+
+    @Override
+    public AstNode visitVariableDeclarators(JavaParser.VariableDeclaratorsContext ctx) {
+        AstNode list = new AstNode(AstNode.Kind.LOCAL_VARIABLE_DECLARATION);
+        for (JavaParser.VariableDeclaratorContext v : ctx.variableDeclarator()) {
+            list.addChild(visit(v));
+        }
+        return list;
     }
 
     @Override
@@ -390,72 +355,111 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     }
 
     @Override
-    public AstNode visitVariableDeclarators(JavaParser.VariableDeclaratorsContext ctx) {
-        AstNode list = new AstNode(AstNode.Kind.LOCAL_VARIABLE_DECLARATION);
-        for (JavaParser.VariableDeclaratorContext v : ctx.variableDeclarator()) {
-            list.addChild(visit(v));
+    public AstNode visitVariableDeclaratorId(JavaParser.VariableDeclaratorIdContext ctx) {
+        AstNode id = visit(ctx.identifier());
+        if (!ctx.LBRACK().isEmpty()) {
+            id.setText(id.getText() + "[]".repeat(ctx.LBRACK().size()));
         }
-        return list;
+        return id;
+    }
+
+    @Override
+    public AstNode visitVariableInitializer(JavaParser.VariableInitializerContext ctx) {
+        // 修正：这里的 expression() 没有参数，因为规则里只有一个 expression
+        if (ctx.expression() != null) {
+            return visit(ctx.expression());
+        }
+        return visit(ctx.arrayInitializer());
+    }
+
+    @Override
+    public AstNode visitArrayInitializer(JavaParser.ArrayInitializerContext ctx) {
+        AstNode arrayInit = new AstNode(AstNode.Kind.EXPRESSION, "ArrayInit");
+        if (ctx.variableInitializer() != null) {
+            for (JavaParser.VariableInitializerContext v : ctx.variableInitializer()) {
+                arrayInit.addChild(visit(v));
+            }
+        }
+        return arrayInit;
     }
 
     @Override
     public AstNode visitLocalVariableDeclaration(JavaParser.LocalVariableDeclarationContext ctx) {
         AstNode local = new AstNode(AstNode.Kind.LOCAL_VARIABLE_DECLARATION);
-        if (!ctx.variableModifier().isEmpty()) {
-            for (JavaParser.VariableModifierContext m : ctx.variableModifier()) {
-                AstNode mod = new AstNode(AstNode.Kind.MODIFIER, m.getText());
-                local.addChild(mod);
-            }
-        }
         if (ctx.VAR() != null) {
-            // var identifier = expression
-            AstNode type = new AstNode(AstNode.Kind.TYPE, "var");
-            local.addChild(type);
+            local.addChild(new AstNode(AstNode.Kind.TYPE, "var"));
             local.addChild(visit(ctx.identifier()));
+            // 修正：这里的 expression() 没有参数
             local.addChild(visit(ctx.expression()));
         } else {
             local.addChild(visit(ctx.typeType()));
-            local.addChild(visit(ctx.variableDeclarators()));
+            for (JavaParser.VariableDeclaratorContext v : ctx.variableDeclarators().variableDeclarator()) {
+                local.addChild(visit(v));
+            }
         }
         return local;
     }
 
-    /* ========= 块 / 语句 ========= */
+    /* ========= 类型系统 ========= */
+
+    @Override
+    public AstNode visitTypeType(JavaParser.TypeTypeContext ctx) {
+        AstNode typeNode;
+        if (ctx.classOrInterfaceType() != null) {
+            typeNode = visit(ctx.classOrInterfaceType());
+        } else {
+            typeNode = visit(ctx.primitiveType());
+        }
+        if (!ctx.LBRACK().isEmpty()) {
+            typeNode.setText(typeNode.getText() + "[]".repeat(ctx.LBRACK().size()));
+        }
+        return typeNode;
+    }
+
+    @Override
+    public AstNode visitPrimitiveType(JavaParser.PrimitiveTypeContext ctx) {
+        return new AstNode(AstNode.Kind.TYPE, ctx.getText());
+    }
+
+    @Override
+    public AstNode visitClassOrInterfaceType(JavaParser.ClassOrInterfaceTypeContext ctx) {
+        return new AstNode(AstNode.Kind.TYPE, ctx.getText());
+    }
+
+    @Override
+    public AstNode visitTypeList(JavaParser.TypeListContext ctx) {
+        AstNode list = new AstNode(AstNode.Kind.TYPE, "typeList");
+        for (JavaParser.TypeTypeContext t : ctx.typeType()) {
+            list.addChild(visit(t));
+        }
+        return list;
+    }
+
+    /* ========= 语句 ========= */
 
     @Override
     public AstNode visitBlock(JavaParser.BlockContext ctx) {
         AstNode block = new AstNode(AstNode.Kind.BLOCK);
         for (JavaParser.BlockStatementContext b : ctx.blockStatement()) {
             AstNode child = visit(b);
-            if (child != null) {
-                block.addChild(child);
-            }
+            if (child != null) block.addChild(child);
         }
         return block;
     }
 
     @Override
     public AstNode visitBlockStatement(JavaParser.BlockStatementContext ctx) {
-        if (ctx.localVariableDeclaration() != null) {
-            return visit(ctx.localVariableDeclaration());
-        }
-        if (ctx.localTypeDeclaration() != null) {
-            return visit(ctx.localTypeDeclaration());
-        }
-        if (ctx.statement() != null) {
-            return visit(ctx.statement());
-        }
+        if (ctx.localVariableDeclaration() != null) return visit(ctx.localVariableDeclaration());
+        if (ctx.statement() != null) return visit(ctx.statement());
         return visitChildren(ctx);
     }
 
     @Override
     public AstNode visitStatement(JavaParser.StatementContext ctx) {
-        // 1) block
-        if (ctx.blockLabel != null) {
-            return visit(ctx.blockLabel);
-        }
+        // 1. Block (代码块)
+        if (ctx.blockLabel != null) return visit(ctx.blockLabel);
 
-        // 2) assert
+        // 2. Assert (断言)
         if (ctx.ASSERT() != null) {
             AstNode node = new AstNode(AstNode.Kind.ASSERT_STATEMENT);
             node.addChild(visit(ctx.expression(0)));
@@ -465,59 +469,50 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             return node;
         }
 
-        // 3) if
+        // 3. If (条件)
         if (ctx.IF() != null) {
-            AstNode cond = visit(ctx.expression(0));
-            AstNode thenStmt = visit(ctx.statement(0));
-            AstNode elseStmt = ctx.ELSE() != null && ctx.statement().size() > 1
-                    ? visit(ctx.statement(1))
-                    : null;
-            return n(AstNode.Kind.IF_STATEMENT, cond, thenStmt, elseStmt);
+            return n(AstNode.Kind.IF_STATEMENT, visit(ctx.expression(0)), visit(ctx.statement(0)),
+                    ctx.ELSE() != null ? visit(ctx.statement(1)) : null);
         }
 
-        // 4) for / enhanced for
+        // 4. For (循环)
         if (ctx.FOR() != null) {
-            AstNode control = visit(ctx.forControl());
-            AstNode body = visit(ctx.statement(0));
-            if (ctx.forControl().enhancedForControl() != null) {
-                return n(AstNode.Kind.ENHANCED_FOR_STATEMENT, control, body);
-            }
-            return n(AstNode.Kind.FOR_STATEMENT, control, body);
+            return n(AstNode.Kind.FOR_STATEMENT, visit(ctx.forControl()), visit(ctx.statement(0)));
         }
 
-        // 5) while
+        // 5. While (循环)
         if (ctx.WHILE() != null) {
-            AstNode cond = visit(ctx.expression(0));
-            AstNode body = visit(ctx.statement(0));
-            return n(AstNode.Kind.WHILE_STATEMENT, cond, body);
+            // 区分 while 和 do-while
+            if (ctx.DO() != null) {
+                return n(AstNode.Kind.DO_WHILE_STATEMENT, visit(ctx.expression(0)), visit(ctx.statement(0)));
+            } else {
+                return n(AstNode.Kind.WHILE_STATEMENT, visit(ctx.expression(0)), visit(ctx.statement(0)));
+            }
         }
 
-        // 6) do-while
-        if (ctx.DO() != null && ctx.WHILE() != null) {
-            AstNode body = visit(ctx.statement(0));
-            AstNode cond = visit(ctx.expression(0));
-            return n(AstNode.Kind.DO_WHILE_STATEMENT, cond, body);
-        }
-
-        // 7) try
+        // 6. Try-Catch-Finally (异常处理) [关键修复点]
         if (ctx.TRY() != null) {
             AstNode tryNode = new AstNode(AstNode.Kind.TRY_STATEMENT);
+            // try-with-resources
+            if (ctx.resourceSpecification() != null) {
+                tryNode.addChild(visit(ctx.resourceSpecification()));
+            }
+            // try body
             if (ctx.block() != null) {
                 tryNode.addChild(visit(ctx.block()));
             }
+            // catch blocks
             for (JavaParser.CatchClauseContext cc : ctx.catchClause()) {
                 tryNode.addChild(visit(cc));
             }
+            // finally block
             if (ctx.finallyBlock() != null) {
                 tryNode.addChild(visit(ctx.finallyBlock()));
-            }
-            if (ctx.resourceSpecification() != null) {
-                tryNode.addChild(visit(ctx.resourceSpecification()));
             }
             return tryNode;
         }
 
-        // 8) switch (语句)
+        // 7. Switch (分支)
         if (ctx.SWITCH() != null) {
             AstNode sw = new AstNode(AstNode.Kind.SWITCH_STATEMENT);
             sw.addChild(visit(ctx.expression(0)));
@@ -530,7 +525,7 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             return sw;
         }
 
-        // 9) synchronized
+        // 8. Synchronized (同步)
         if (ctx.SYNCHRONIZED() != null) {
             AstNode sync = new AstNode(AstNode.Kind.SYNCHRONIZED_STATEMENT);
             sync.addChild(visit(ctx.expression(0)));
@@ -538,48 +533,40 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             return sync;
         }
 
-        // 10) return
+        // 9. Return (返回)
         if (ctx.RETURN() != null) {
             AstNode ret = new AstNode(AstNode.Kind.RETURN_STATEMENT);
-            if (!ctx.expression().isEmpty()) {
+            if (ctx.expression() != null && !ctx.expression().isEmpty()) {
                 ret.addChild(visit(ctx.expression(0)));
             }
             return ret;
         }
 
-        // 11) throw
+        // 10. Throw (抛出异常)
         if (ctx.THROW() != null) {
-            AstNode t = new AstNode(AstNode.Kind.THROW_STATEMENT);
-            t.addChild(visit(ctx.expression(0)));
-            return t;
+            AstNode thr = new AstNode(AstNode.Kind.THROW_STATEMENT);
+            thr.addChild(visit(ctx.expression(0)));
+            return thr;
         }
 
-        // 12) break
+        // 11. Break/Continue/Yield
         if (ctx.BREAK() != null) {
-            AstNode b = new AstNode(AstNode.Kind.BREAK_STATEMENT);
-            if (ctx.identifier() != null) {
-                b.addChild(visit(ctx.identifier()));
-            }
-            return b;
+            AstNode brk = new AstNode(AstNode.Kind.BREAK_STATEMENT);
+            if (ctx.identifier() != null) brk.addChild(visit(ctx.identifier()));
+            return brk;
         }
-
-        // 13) continue
         if (ctx.CONTINUE() != null) {
-            AstNode c = new AstNode(AstNode.Kind.CONTINUE_STATEMENT);
-            if (ctx.identifier() != null) {
-                c.addChild(visit(ctx.identifier()));
-            }
-            return c;
+            AstNode cont = new AstNode(AstNode.Kind.CONTINUE_STATEMENT);
+            if (ctx.identifier() != null) cont.addChild(visit(ctx.identifier()));
+            return cont;
         }
-
-        // 14) yield
         if (ctx.YIELD() != null) {
-            AstNode y = new AstNode(AstNode.Kind.YIELD_STATEMENT);
-            y.addChild(visit(ctx.expression(0)));
-            return y;
+            AstNode yieldNode = new AstNode(AstNode.Kind.YIELD_STATEMENT);
+            yieldNode.addChild(visit(ctx.expression(0)));
+            return yieldNode;
         }
 
-        // 16) 以表达式结尾的语句 (Assignment, Method Call 等)
+        // 12. 表达式语句 (赋值、方法调用等)
         if (ctx.statementExpression != null || ctx.switchExpression() != null) {
             AstNode expr = ctx.statementExpression != null
                     ? visit(ctx.statementExpression)
@@ -587,28 +574,37 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
             return n(AstNode.Kind.EXPR_STATEMENT, expr);
         }
 
-        // 15) 空分号 (放在表达式语句判断之后)
-        if (ctx.SEMI() != null) {
-            return new AstNode(AstNode.Kind.EMPTY_STATEMENT);
-        }
-
-        // 17) 带 label 的语句
+        // 13. 带标签的语句 (Label: ...)
         if (ctx.identifierLabel != null) {
             AstNode label = new AstNode(AstNode.Kind.LABELED_STATEMENT, ctx.identifierLabel.getText());
             label.addChild(visit(ctx.statement(0)));
             return label;
         }
 
+        // 14. 空语句 (;)
+        if (ctx.SEMI() != null) return new AstNode(AstNode.Kind.EMPTY_STATEMENT);
+
         return visitChildren(ctx);
     }
-
     @Override
     public AstNode visitCatchClause(JavaParser.CatchClauseContext ctx) {
         AstNode catchNode = new AstNode(AstNode.Kind.CATCH_CLAUSE);
+        // 1. 异常类型
         catchNode.addChild(visit(ctx.catchType()));
+        // 2. 异常变量名
         catchNode.addChild(visit(ctx.identifier()));
+        // 3. 处理代码块
         catchNode.addChild(visit(ctx.block()));
         return catchNode;
+    }
+
+    @Override
+    public AstNode visitCatchType(JavaParser.CatchTypeContext ctx) {
+        // 处理多重捕获 (Type1 | Type2 | ...)
+        // 我们可以把它们合并成一个 TYPE 节点，或者创建一个 UNION_TYPE
+        // 这里简单起见，返回一个包含所有类型的 TYPE 节点
+        AstNode typeNode = new AstNode(AstNode.Kind.TYPE, ctx.getText());
+        return typeNode;
     }
 
     @Override
@@ -616,6 +612,121 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
         AstNode f = new AstNode(AstNode.Kind.FINALLY_BLOCK);
         f.addChild(visit(ctx.block()));
         return f;
+    }
+    // --- Try-with-resources 相关 (可选，用于更复杂的 try) ---
+    @Override
+    public AstNode visitResourceSpecification(JavaParser.ResourceSpecificationContext ctx) {
+        return visit(ctx.resources());
+    }
+
+    @Override
+    public AstNode visitResources(JavaParser.ResourcesContext ctx) {
+        AstNode resources = new AstNode(AstNode.Kind.LOCAL_VARIABLE_DECLARATION, "Resources");
+        for (JavaParser.ResourceContext rc : ctx.resource()) {
+            resources.addChild(visit(rc));
+        }
+        return resources;
+    }
+
+    @Override
+    public AstNode visitResource(JavaParser.ResourceContext ctx) {
+        AstNode res = new AstNode(AstNode.Kind.VARIABLE_DECLARATOR);
+        // 简化处理：直接挂载定义的文本或类型
+        if (ctx.classOrInterfaceType() != null) {
+            res.addChild(visit(ctx.classOrInterfaceType()));
+            res.addChild(visit(ctx.variableDeclaratorId()));
+            res.addChild(visit(ctx.expression()));
+        } else {
+            // 处理 resource 为变量引用的情况
+            res.addChild(visit(ctx.qualifiedName()));
+        }
+        return res;
+    }
+
+    @Override
+    public AstNode visitForControl(JavaParser.ForControlContext ctx) {
+        AstNode control = new AstNode(AstNode.Kind.EXPRESSION, "forControl");
+        if (ctx.enhancedForControl() != null) {
+            return visit(ctx.enhancedForControl());
+        }
+        // 标准 for 循环: forInit? ; expression? ; forUpdate?
+        if (ctx.forInit() != null) control.addChild(visit(ctx.forInit()));
+
+        // 修正点：expression() 没有参数
+        if (ctx.expression() != null) control.addChild(visit(ctx.expression()));
+
+        if (ctx.forUpdate != null) control.addChild(visit(ctx.forUpdate));
+        return control;
+    }
+
+    @Override
+    public AstNode visitForInit(JavaParser.ForInitContext ctx) {
+        if (ctx.localVariableDeclaration() != null) return visit(ctx.localVariableDeclaration());
+        return visit(ctx.expressionList());
+    }
+
+    @Override
+    public AstNode visitEnhancedForControl(JavaParser.EnhancedForControlContext ctx) {
+        AstNode node = new AstNode(AstNode.Kind.LOCAL_VARIABLE_DECLARATION, "enhancedFor");
+        node.addChild(visit(ctx.typeType()));
+        node.addChild(visit(ctx.variableDeclaratorId()));
+        // 修正：enhancedForControl 里 expression 是唯一的
+        node.addChild(visit(ctx.expression()));
+        return node;
+    }
+
+    @Override
+    public AstNode visitSwitchBlockStatementGroup(JavaParser.SwitchBlockStatementGroupContext ctx) {
+        AstNode group = new AstNode(AstNode.Kind.BLOCK, "caseGroup");
+        for (JavaParser.SwitchLabelContext label : ctx.switchLabel()) {
+            group.addChild(visit(label));
+        }
+        for (JavaParser.BlockStatementContext bs : ctx.blockStatement()) {
+            group.addChild(visit(bs));
+        }
+        return group;
+    }
+
+    @Override
+    public AstNode visitSwitchLabel(JavaParser.SwitchLabelContext ctx) {
+        if (ctx.DEFAULT() != null) return new AstNode(AstNode.Kind.LITERAL, "default");
+        if (ctx.constantExpression != null) return visit(ctx.constantExpression);
+        if (ctx.enumConstantName != null) return new AstNode(AstNode.Kind.IDENTIFIER, ctx.enumConstantName.getText());
+        return new AstNode(AstNode.Kind.UNKNOWN, "case");
+    }
+
+    /* ========= 对象创建 ========= */
+
+    @Override
+    public AstNode visitObjectCreationExpression(JavaParser.ObjectCreationExpressionContext ctx) {
+        AstNode obj = new AstNode(AstNode.Kind.OBJECT_CREATION_EXPR, "new");
+        obj.addChild(visit(ctx.creator()));
+        return obj;
+    }
+
+    @Override
+    public AstNode visitCreator(JavaParser.CreatorContext ctx) {
+        AstNode creator = new AstNode(AstNode.Kind.TYPE, "creator");
+        creator.addChild(visit(ctx.createdName()));
+        if (ctx.classCreatorRest() != null) creator.addChild(visit(ctx.classCreatorRest()));
+        if (ctx.arrayCreatorRest() != null) creator.addChild(visit(ctx.arrayCreatorRest()));
+        return creator;
+    }
+
+    @Override
+    public AstNode visitCreatedName(JavaParser.CreatedNameContext ctx) {
+        return new AstNode(AstNode.Kind.TYPE, ctx.getText());
+    }
+
+    @Override
+    public AstNode visitClassCreatorRest(JavaParser.ClassCreatorRestContext ctx) {
+        return visit(ctx.arguments());
+    }
+
+    @Override
+    public AstNode visitArrayCreatorRest(JavaParser.ArrayCreatorRestContext ctx) {
+        if (ctx.arrayInitializer() != null) return visit(ctx.arrayInitializer());
+        return new AstNode(AstNode.Kind.EXPRESSION, "arrayDimension");
     }
 
     /* ========= 表达式 ========= */
@@ -627,22 +738,11 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
 
     @Override
     public AstNode visitPrimary(JavaParser.PrimaryContext ctx) {
-        if (ctx.expression() != null) {
-            return visit(ctx.expression());
-        }
-        if (ctx.THIS() != null || ctx.SUPER() != null) {
-            return new AstNode(AstNode.Kind.IDENTIFIER, ctx.getText());
-        }
-        if (ctx.literal() != null) {
-            return visit(ctx.literal());
-        }
-        if (ctx.identifier() != null) {
-            return visit(ctx.identifier());
-        }
-        if (ctx.typeTypeOrVoid() != null && ctx.CLASS() != null) {
-            AstNode type = visit(ctx.typeTypeOrVoid());
-            return n(AstNode.Kind.PRIMARY_EXPR, "classLiteral", type);
-        }
+        // 修正：primary 里的 expression 是唯一的
+        if (ctx.expression() != null) return visit(ctx.expression());
+        if (ctx.THIS() != null) return new AstNode(AstNode.Kind.IDENTIFIER, "this");
+        if (ctx.literal() != null) return visit(ctx.literal());
+        if (ctx.identifier() != null) return visit(ctx.identifier());
         return visitChildren(ctx);
     }
 
@@ -657,22 +757,9 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     }
 
     @Override
-    public AstNode visitMethodCallExpression(JavaParser.MethodCallExpressionContext ctx) {
-        return visit(ctx.methodCall());
-    }
-
-    @Override
     public AstNode visitMethodCall(JavaParser.MethodCallContext ctx) {
         AstNode call = new AstNode(AstNode.Kind.METHOD_CALL_EXPR);
-        // 调用目标：标识符 / this / super
-        if (ctx.identifier() != null) {
-            call.addChild(visit(ctx.identifier()));
-        } else if (ctx.THIS() != null) {
-            call.addChild(new AstNode(AstNode.Kind.IDENTIFIER, "this"));
-        } else if (ctx.SUPER() != null) {
-            call.addChild(new AstNode(AstNode.Kind.IDENTIFIER, "super"));
-        }
-        // 实参
+        if (ctx.identifier() != null) call.addChild(visit(ctx.identifier()));
         call.addChild(visit(ctx.arguments()));
         return call;
     }
@@ -680,9 +767,7 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     @Override
     public AstNode visitArguments(JavaParser.ArgumentsContext ctx) {
         AstNode args = new AstNode(AstNode.Kind.EXPRESSION, "args");
-        if (ctx.expressionList() != null) {
-            args.addChild(visit(ctx.expressionList()));
-        }
+        if (ctx.expressionList() != null) args.addChild(visit(ctx.expressionList()));
         return args;
     }
 
@@ -696,144 +781,60 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     }
 
     @Override
-    public AstNode visitSquareBracketExpression(JavaParser.SquareBracketExpressionContext ctx) {
-        AstNode arrayAccess = new AstNode(AstNode.Kind.ARRAY_ACCESS_EXPR);
-        arrayAccess.addChild(visit(ctx.expression(0))); // target
-        arrayAccess.addChild(visit(ctx.expression(1))); // index
-        return arrayAccess;
-    }
-
-    @Override
     public AstNode visitMemberReferenceExpression(JavaParser.MemberReferenceExpressionContext ctx) {
-        AstNode member = new AstNode(AstNode.Kind.MEMBER_SELECT_EXPR, ctx.bop.getText());
+        AstNode member = new AstNode(AstNode.Kind.MEMBER_SELECT_EXPR, ".");
         member.addChild(visit(ctx.expression()));
-        if (ctx.identifier() != null) {
-            member.addChild(visit(ctx.identifier()));
-        } else if (ctx.methodCall() != null) {
-            member.addChild(visit(ctx.methodCall()));
-        } else if (ctx.THIS() != null) {
-            member.addChild(new AstNode(AstNode.Kind.IDENTIFIER, "this"));
-        } else if (ctx.SUPER() != null) {
-            member.addChild(new AstNode(AstNode.Kind.IDENTIFIER, "super"));
-        } else if (ctx.innerCreator() != null) {
-            member.addChild(visit(ctx.innerCreator()));
-        } else if (ctx.explicitGenericInvocation() != null) {
-            member.addChild(visit(ctx.explicitGenericInvocation()));
-        }
+        if (ctx.identifier() != null) member.addChild(visit(ctx.identifier()));
+        if (ctx.methodCall() != null) member.addChild(visit(ctx.methodCall()));
         return member;
     }
 
     @Override
     public AstNode visitBinaryOperatorExpression(JavaParser.BinaryOperatorExpressionContext ctx) {
-        String op = ctx.bop.getText();
-        AstNode left = visit(ctx.expression(0));
-        AstNode right = visit(ctx.expression(1));
-
-        AstNode.Kind kind;
-        // 赋值及复合赋值
-        if ("=".equals(op) || "+=".equals(op) || "-=".equals(op) || "*=".equals(op)
-                || "/=".equals(op) || "&=".equals(op) || "|=".equals(op) || "^=".equals(op)
-                || ">>=".equals(op) || ">>>=".equals(op) || "<<=".equals(op) || "%=".equals(op)) {
-            kind = AstNode.Kind.ASSIGNMENT_EXPR;
-        } else {
-            kind = AstNode.Kind.BINARY_EXPR;
-        }
-
-        AstNode node = new AstNode(kind, op);
-        node.addChild(left);
-        node.addChild(right);
+        AstNode node = new AstNode(AstNode.Kind.BINARY_EXPR, ctx.bop.getText());
+        if (ctx.bop.getType() == JavaParser.ASSIGN) node = new AstNode(AstNode.Kind.ASSIGNMENT_EXPR, "=");
+        // BinaryOperatorExpressionContext 继承自 ExpressionContext，而 expression 规则里有多个 expression
+        // 所以这里必须用 (0) 和 (1)
+        node.addChild(visit(ctx.expression(0)));
+        node.addChild(visit(ctx.expression(1)));
         return node;
     }
 
     @Override
     public AstNode visitUnaryOperatorExpression(JavaParser.UnaryOperatorExpressionContext ctx) {
-        String op = ctx.prefix.getText();
-        AstNode expr = visit(ctx.expression());
-        AstNode node = new AstNode(AstNode.Kind.UNARY_EXPR, op);
-        node.addChild(expr);
+        AstNode node = new AstNode(AstNode.Kind.UNARY_EXPR, ctx.prefix.getText());
+        node.addChild(visit(ctx.expression()));
         return node;
     }
 
     @Override
     public AstNode visitPostIncrementDecrementOperatorExpression(JavaParser.PostIncrementDecrementOperatorExpressionContext ctx) {
-        String op = ctx.postfix.getText();
-        AstNode expr = visit(ctx.expression());
-        AstNode node = new AstNode(AstNode.Kind.UNARY_EXPR, op);
-        node.addChild(expr);
-        return node;
-    }
-
-    @Override
-    public AstNode visitCastExpression(JavaParser.CastExpressionContext ctx) {
-        AstNode cast = new AstNode(AstNode.Kind.CAST_EXPR);
-        cast.addChild(visit(ctx.typeType(0)));
-        cast.addChild(visit(ctx.expression()));
-        return cast;
-    }
-
-    @Override
-    public AstNode visitObjectCreationExpression(JavaParser.ObjectCreationExpressionContext ctx) {
-        AstNode obj = new AstNode(AstNode.Kind.OBJECT_CREATION_EXPR, "new");
-        obj.addChild(visit(ctx.creator()));
-        return obj;
-    }
-
-    @Override
-    public AstNode visitInstanceOfOperatorExpression(JavaParser.InstanceOfOperatorExpressionContext ctx) {
-        AstNode node = new AstNode(AstNode.Kind.INSTANCEOF_EXPR, ctx.bop.getText());
+        AstNode node = new AstNode(AstNode.Kind.UNARY_EXPR, ctx.postfix.getText());
         node.addChild(visit(ctx.expression()));
-        if (ctx.typeType() != null) {
-            node.addChild(visit(ctx.typeType()));
-        } else if (ctx.pattern() != null) {
-            node.addChild(visit(ctx.pattern()));
-        }
         return node;
     }
+    
 
     @Override
-    public AstNode visitTernaryExpression(JavaParser.TernaryExpressionContext ctx) {
-        AstNode cond = visit(ctx.expression(0));
-        AstNode thenExpr = visit(ctx.expression(1));
-        AstNode elseExpr = visit(ctx.expression(2));
-        AstNode node = new AstNode(AstNode.Kind.CONDITIONAL_EXPR, "? :");
-        node.addChild(cond);
-        node.addChild(thenExpr);
-        node.addChild(elseExpr);
+    public AstNode visitSquareBracketExpression(JavaParser.SquareBracketExpressionContext ctx) {
+        AstNode node = new AstNode(AstNode.Kind.ARRAY_ACCESS_EXPR);
+        node.addChild(visit(ctx.expression(0)));
+        node.addChild(visit(ctx.expression(1)));
         return node;
     }
-
-    @Override
-    public AstNode visitExpressionLambda(JavaParser.ExpressionLambdaContext ctx) {
-        AstNode node = new AstNode(AstNode.Kind.LAMBDA_EXPR);
-        node.addChild(visit(ctx.lambdaExpression()));
-        return node;
-    }
-
-    /* ========= 默认规则：把未专门处理的规则也包装成 AST ========= */
 
     @Override
     public AstNode visitChildren(RuleNode node) {
-        if (!(node instanceof ParserRuleContext)) {
-            return super.visitChildren(node);
-        }
-        ParserRuleContext ctx = (ParserRuleContext) node;
-        String ruleName = JavaParser.ruleNames[ctx.getRuleIndex()];
-        AstNode result = new AstNode(AstNode.Kind.UNKNOWN, ruleName);
-        int n = ctx.getChildCount();
-        for (int i = 0; i < n; i++) {
-            ParseTree c = ctx.getChild(i);
-            AstNode childAst = c.accept(this);
-            if (childAst != null) {
-                result.addChild(childAst);
+        if (node instanceof ParserRuleContext) {
+            ParserRuleContext ctx = (ParserRuleContext) node;
+            String ruleName = JavaParser.ruleNames[ctx.getRuleIndex()];
+            AstNode result = new AstNode(AstNode.Kind.UNKNOWN, ruleName);
+            for (int i = 0; i < ctx.getChildCount(); i++) {
+                AstNode c = ctx.getChild(i).accept(this);
+                if (c != null) result.addChild(c);
             }
+            return result;
         }
-        return result;
-    }
-
-    @Override
-    public AstNode visitTerminal(TerminalNode node) {
-        // 默认不为每个 token 建节点，避免 AST 过于冗长；
-        // 关键 token（标识符 / literal）在对应规则里已经处理。
         return null;
     }
 }
