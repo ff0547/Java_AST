@@ -4,6 +4,8 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.RuleNode;
 import org.antlr.v4.runtime.tree.TerminalNode;
+import org.antlr.v4.runtime.tree.TerminalNode;
+
 
 import java.util.ArrayList;
 import java.util.List;
@@ -252,12 +254,71 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
 
     @Override
     public AstNode visitMemberDeclaration(JavaParser.MemberDeclarationContext ctx) {
-        if (ctx.methodDeclaration() != null) return visit(ctx.methodDeclaration());
-        if (ctx.fieldDeclaration() != null) return visit(ctx.fieldDeclaration());
-        if (ctx.constructorDeclaration() != null) return visit(ctx.constructorDeclaration());
-        if (ctx.classDeclaration() != null) return visit(ctx.classDeclaration());
+        // record 类
+        if (ctx.recordDeclaration() != null) {
+            return visit(ctx.recordDeclaration());
+        }
+        // 普通方法
+        if (ctx.methodDeclaration() != null) {
+            return visit(ctx.methodDeclaration());
+        }
+        // 泛型方法：<T> 返回 visitGenericMethodDeclaration
+        if (ctx.genericMethodDeclaration() != null) {
+            return visit(ctx.genericMethodDeclaration());
+        }
+        // 字段
+        if (ctx.fieldDeclaration() != null) {
+            return visit(ctx.fieldDeclaration());
+        }
+        // 构造函数
+        if (ctx.constructorDeclaration() != null) {
+            return visit(ctx.constructorDeclaration());
+        }
+        // 泛型构造函数
+        if (ctx.genericConstructorDeclaration() != null) {
+            return visit(ctx.genericConstructorDeclaration());
+        }
+        // 接口 / 注解 / 类 / 枚举
+        if (ctx.interfaceDeclaration() != null) {
+            return visit(ctx.interfaceDeclaration());
+        }
+        if (ctx.annotationTypeDeclaration() != null) {
+            return visit(ctx.annotationTypeDeclaration());
+        }
+        if (ctx.classDeclaration() != null) {
+            return visit(ctx.classDeclaration());
+        }
+        if (ctx.enumDeclaration() != null) {
+            return visit(ctx.enumDeclaration());
+        }
+
         return visitChildren(ctx);
     }
+    @Override
+    public AstNode visitGenericMethodDeclaration(JavaParser.GenericMethodDeclarationContext ctx) {
+        // 先用现有逻辑构建普通方法 AST
+        AstNode method = visit(ctx.methodDeclaration());
+
+        // 再把类型参数作为一个 TYPE 节点插到最前面，比如 "<T>"、"<K, V>"
+        if (method != null && ctx.typeParameters() != null) {
+            AstNode typeParams = new AstNode(AstNode.Kind.TYPE, ctx.typeParameters().getText());
+            // 你之前在别处用过 addChildFirst，这里也沿用
+            method.addChildFirst(typeParams);
+        }
+        return method;
+    }
+
+    @Override
+    public AstNode visitGenericConstructorDeclaration(JavaParser.GenericConstructorDeclarationContext ctx) {
+        AstNode ctor = visit(ctx.constructorDeclaration());
+        if (ctor != null && ctx.typeParameters() != null) {
+            AstNode typeParams = new AstNode(AstNode.Kind.TYPE, ctx.typeParameters().getText());
+            ctor.addChildFirst(typeParams);
+        }
+        return ctor;
+    }
+
+
 
     /* ========= 方法与字段 ========= */
 
@@ -732,6 +793,17 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
     /* ========= 表达式 ========= */
 
     @Override
+    public AstNode visitMethodCallExpression(JavaParser.MethodCallExpressionContext ctx) {
+        // grammar:
+        // expression : methodCall #MethodCallExpression
+        //
+        // 这里 expression 本身就是一次方法调用，
+        // 直接把内部的 methodCall 结果作为当前表达式节点返回，
+        // 避免出现 UNKNOWN(expression) -> METHOD_CALL_EXPR 这一层多余包装。
+        return visit(ctx.methodCall());
+    }
+
+    @Override
     public AstNode visitPrimaryExpression(JavaParser.PrimaryExpressionContext ctx) {
         return visit(ctx.primary());
     }
@@ -798,6 +870,70 @@ public class JavaAstBuilderVisitor extends JavaBaseVisitor<AstNode> {
         node.addChild(visit(ctx.expression(0)));
         node.addChild(visit(ctx.expression(1)));
         return node;
+    }
+
+    /* ========= Lambda 表达式 ========= */
+
+    @Override
+    public AstNode visitExpressionLambda(JavaParser.ExpressionLambdaContext ctx) {
+        // expression 里的 lambda 备选：直接把子规则 lambdaExpression 映射成一个表达式节点
+        return visit(ctx.lambdaExpression());
+    }
+
+    @Override
+    public AstNode visitLambdaExpression(JavaParser.LambdaExpressionContext ctx) {
+        // 用一个通用的 EXPRESSION 节点表示 lambda，本身不丢失结构
+        AstNode lambda = new AstNode(AstNode.Kind.EXPRESSION, "lambda");
+        lambda.addChild(visit(ctx.lambdaParameters()));
+        lambda.addChild(visit(ctx.lambdaBody()));
+        return lambda;
+    }
+
+    @Override
+    public AstNode visitLambdaParameters(JavaParser.LambdaParametersContext ctx) {
+        AstNode params = new AstNode(AstNode.Kind.PARAMETER_LIST);
+
+        // 1) x -> ...
+        // 3) (x, y) -> ...
+        if (!ctx.identifier().isEmpty()) {
+            // 这里的元素类型是 JavaParser.IdentifierContext
+            for (JavaParser.IdentifierContext idCtx : ctx.identifier()) {
+                // 你已经有 visitIdentifier，可以直接复用
+                AstNode idNode = visit(idCtx);
+                if (idNode != null) {
+                    params.addChild(idNode);
+                }
+            }
+            return params;
+        }
+
+
+        // 2) (int x, int y) -> ...
+        if (ctx.formalParameterList() != null) {
+            params.addChild(visit(ctx.formalParameterList()));
+            return params;
+        }
+
+        // 4) (var x, var y) -> ...  （lambdaLVTIList）
+        if (ctx.lambdaLVTIList() != null) {
+            // 先保留原结构，后面需要的话再细化
+            params.addChild(visit(ctx.lambdaLVTIList()));
+        }
+
+        return params;
+    }
+
+    @Override
+    public AstNode visitLambdaBody(JavaParser.LambdaBodyContext ctx) {
+        // 表达式形式：x -> x + 1
+        if (ctx.expression() != null) {
+            return visit(ctx.expression());
+        }
+        // 代码块形式：x -> { ... }
+        if (ctx.block() != null) {
+            return visit(ctx.block());
+        }
+        return null;
     }
 
     @Override
