@@ -53,7 +53,7 @@ AST 使用 AstNode 统一表示，包含 kind（节点类型）、text（源代�
 | `RETURN_STATEMENT`   | `return expr;`                                    |
 | `BREAK_STATEMENT`    | `break;`                                          |
 
-4。 表达式
+4. 表达式
 
 | 节点类型                   | 说明                                       |
 | ---------------------- | ---------------------------------------- |
